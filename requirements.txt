@@ -3,3 +3,4 @@ rarfile
 py7zr
 PyPDF2
 python-telegram-bot
+flask
