@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+#not about clear data: zip,etc..
 """
 Zip Cracker with Telegram Bot and Web Interface
 Multi‑format support: ZIP, RAR, 7z, PDF
