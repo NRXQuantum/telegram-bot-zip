@@ -3,11 +3,14 @@
 #  Multi-Format Password Cracker — One-Line Installer
 #  Repo: https://github.com/NRXQuantum/telegram-bot-zip
 #
-#  Mode: Bot-only auto-start
+#  Mode: Bot-only auto-start with token validation gate
 #  Supports: Termux, Debian/Ubuntu/Kali/Colab, Arch, Fedora, macOS
 #
-#  Usage:
+#  Usage (interactive):
 #    curl -fsSL https://raw.githubusercontent.com/NRXQuantum/telegram-bot-zip/main/install.sh | bash
+#
+#  Usage (env var):
+#    TELEGRAM_BOT_TOKEN="123:ABC" curl -fsSL .../install.sh | bash
 # ============================================================
 set -euo pipefail
 
@@ -16,6 +19,7 @@ REPO_RAW="${REPO_RAW:-https://raw.githubusercontent.com/NRXQuantum/telegram-bot-
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.zip_cracker}"
 PY_SCRIPT="zip_cracker.py"
 DICT_FILE="password_list.txt"
+MAX_TOKEN_ATTEMPTS=3
 
 # ---------------------- Colors ----------------------
 if [ -t 1 ]; then
@@ -47,7 +51,7 @@ ask() {
     local prompt="$1" varname="$2" default="${3:-}" ans=""
     if [ -t 0 ]; then
         read -rp "$prompt" ans || true
-    elif [ -r /dev/tty ]; then
+    elif [ -c /dev/tty ] && [ -r /dev/tty ]; then
         read -rp "$prompt" ans < /dev/tty || true
     else
         ans="$default"
@@ -64,6 +68,150 @@ run_as_root() {
     else
         "$@"
     fi
+}
+
+# ============================================================
+#  TOKEN VALIDATION — the heart of the fix
+# ============================================================
+# Validates a token via Telegram getMe.
+# Returns 0 (success) if valid, 1 (failure) otherwise.
+# Prints nothing except optional debug to stderr.
+# ============================================================
+validate_token() {
+    local token="$1"
+
+    if [ -z "$token" ]; then
+        return 1
+    fi
+
+    local resp=""
+    if command -v curl >/dev/null 2>&1; then
+        resp=$(curl -fsSL --max-time 10 \
+            "https://api.telegram.org/bot${token}/getMe" 2>/dev/null || echo "")
+    elif command -v wget >/dev/null 2>&1; then
+        resp=$(wget -q -O - --timeout=10 \
+            "https://api.telegram.org/bot${token}/getMe" 2>/dev/null || echo "")
+    else
+        # No HTTP client — can't validate, assume valid
+        return 0
+    fi
+
+    if echo "$resp" | grep -q '"ok":true'; then
+        return 0
+    fi
+    return 1
+}
+
+# Extract bot username from a valid token
+extract_bot_username() {
+    local token="$1"
+    local resp=""
+    if command -v curl >/dev/null 2>&1; then
+        resp=$(curl -fsSL --max-time 10 \
+            "https://api.telegram.org/bot${token}/getMe" 2>/dev/null || echo "")
+    fi
+    echo "$resp" | sed -n 's/.*"username":"\([^"]*\)".*/\1/p'
+}
+
+# Extract error reason
+extract_error() {
+    local token="$1"
+    local resp=""
+    if command -v curl >/dev/null 2>&1; then
+        resp=$(curl -fsSL --max-time 10 \
+            "https://api.telegram.org/bot${token}/getMe" 2>/dev/null || echo "")
+    fi
+    echo "$resp" | sed -n 's/.*"description":"\([^"]*\)".*/\1/p'
+}
+
+# ============================================================
+#  VALIDATED TOKEN GATE
+#  Runs right before launch. Blocks launch if invalid.
+#  Retries up to MAX_TOKEN_ATTEMPTS times with new tokens.
+# ============================================================
+token_gate() {
+    ENV_FILE="$INSTALL_DIR/.env"
+    local attempt=0
+    local current_token=""
+
+    while [ "$attempt" -lt "$MAX_TOKEN_ATTEMPTS" ]; do
+        attempt=$((attempt + 1))
+
+        # ---------- Read current token from .env ----------
+        if [ -f "$ENV_FILE" ]; then
+            current_token=$(
+                grep -E '^[[:space:]]*TELEGRAM_BOT_TOKEN[[:space:]]*=' "$ENV_FILE" 2>/dev/null \
+                | grep -v '^[[:space:]]*#' \
+                | head -n1 \
+                | sed -E 's/^[[:space:]]*TELEGRAM_BOT_TOKEN[[:space:]]*=[[:space:]]*//' \
+                | tr -d '\r\n' \
+                | sed -E 's/^"(.*)"$/\1/' \
+                | sed -E "s/^'(.*)'\$/\1/" \
+                | xargs 2>/dev/null || true
+            )
+        fi
+
+        # ---------- Validate ----------
+        if [ -n "$current_token" ]; then
+            log "Validating token (attempt $attempt/$MAX_TOKEN_ATTEMPTS)..."
+            if validate_token "$current_token"; then
+                local username
+                username=$(extract_bot_username "$current_token")
+                echo
+                ok "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                ok "  ✅ TOKEN IS VALID"
+                ok "     Bot: @${username}"
+                ok "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                echo
+                return 0
+            else
+                local reason
+                reason=$(extract_error "$current_token")
+                echo
+                warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                warn "  ❌ TOKEN IS INVALID"
+                warn "     Reason: ${reason:-Unknown (network?)}"
+                warn "     Preview: ${current_token:0:12}...${current_token: -4}"
+                warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                echo
+                warn "Token file: $ENV_FILE"
+                echo
+            fi
+        else
+            warn "No token found in $ENV_FILE"
+            echo
+        fi
+
+        # ---------- Interactive re-prompt ----------
+        if [ -t 1 ] && { [ -t 0 ] || [ -c /dev/tty ]; }; then
+            echo "${BLD}BotFather থেকে একটি নতুন টোকেন নিন:${NC}"
+            echo "  1. Telegram → @BotFather"
+            echo "  2. /newbot  (অথবা /mybots → API Token → Revoke)"
+            echo "  3. টোকেন কপি করে নিচে পেস্ট করুন"
+            echo
+            ask "Paste NEW TELEGRAM_BOT_TOKEN (or press Ctrl+C to abort): " NEW_TOKEN ""
+
+            if [ -z "${NEW_TOKEN:-}" ]; then
+                warn "খালি টোকেন — আবার চেষ্টা করব..."
+                continue
+            fi
+
+            # Save to .env
+            umask 077
+            {
+                echo "# Auto-generated by install.sh"
+                echo "TELEGRAM_BOT_TOKEN=$NEW_TOKEN"
+            } > "$ENV_FILE"
+            chmod 600 "$ENV_FILE" 2>/dev/null || true
+            ok "Saved new token to .env — validating on next attempt..."
+            echo
+        else
+            # Non-interactive and token invalid → give up
+            die "Token invalid and no TTY for re-prompt. Update $ENV_FILE manually."
+        fi
+    done
+
+    die "Token validation failed after $MAX_TOKEN_ATTEMPTS attempts. Aborting launch."
 }
 
 # ---------------------- Kill previous bot ----------------------
@@ -176,12 +324,11 @@ install_system_deps() {
     ok "System deps done."
 }
 
-# ---------------------- Python deps (robust) ----------------------
+# ---------------------- Python deps ----------------------
 install_python_deps() {
     log "Setting up Python environment..."
     cd "$INSTALL_DIR"
 
-    # Ensure python3-venv available
     if ! python3 -m venv --help >/dev/null 2>&1; then
         warn "python3-venv missing — installing..."
         case "$ENV_TYPE" in
@@ -193,7 +340,6 @@ install_python_deps() {
         esac
     fi
 
-    # Clean broken venv
     if [ -d ".venv" ] && [ ! -f ".venv/bin/activate" ]; then
         warn "Broken .venv detected — removing."
         rm -rf .venv
@@ -266,7 +412,6 @@ install_python_deps() {
 
     if [ -n "$MISSING" ]; then
         warn "Missing modules:$MISSING"
-        warn "Some formats may not work, but bot should start."
     else
         ok "All Python modules verified."
     fi
@@ -303,59 +448,38 @@ fetch_script() {
     fi
 }
 
-# ---------------------- Token / .env (ROBUST) ----------------------
+# ---------------------- Initial token capture (no validation) ----------------------
 setup_env_file() {
     ENV_FILE="$INSTALL_DIR/.env"
-    local EXISTING_TOKEN=""
 
-    # ---- Robust extraction ----
-    # Ignores: comments (#), leading/trailing spaces, quotes, CR (\r)
-    if [ -f "$ENV_FILE" ]; then
-        EXISTING_TOKEN=$(
-            grep -E '^[[:space:]]*TELEGRAM_BOT_TOKEN[[:space:]]*=' "$ENV_FILE" 2>/dev/null \
-            | grep -v '^[[:space:]]*#' \
-            | head -n1 \
-            | sed -E 's/^[[:space:]]*TELEGRAM_BOT_TOKEN[[:space:]]*=[[:space:]]*//' \
-            | tr -d '\r\n' \
-            | sed -E 's/^"(.*)"$/\1/' \
-            | sed -E "s/^'(.*)'\$/\1/" \
-            | xargs 2>/dev/null || true
-        )
+    # If env var provided, save it (validation happens later in token_gate)
+    if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
+        ok "TELEGRAM_BOT_TOKEN provided via environment variable."
+        umask 077
+        {
+            echo "# Auto-generated by install.sh (from env var)"
+            echo "TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN"
+        } > "$ENV_FILE"
+        chmod 600 "$ENV_FILE" 2>/dev/null || true
+        ok "Token saved to $ENV_FILE"
+        return
     fi
 
-    # ---- If valid token found, offer to reuse ----
-    if [ -n "$EXISTING_TOKEN" ] && [ "$EXISTING_TOKEN" != "your_token_here" ]; then
-        ok "Existing token found in $ENV_FILE"
-        local PREVIEW="${EXISTING_TOKEN:0:12}...${EXISTING_TOKEN: -4}"
-        echo "    Preview: $PREVIEW"
-        echo
-
-        if [ -t 1 ] && { [ -t 0 ] || [ -r /dev/tty ]; }; then
-            ask "Use this token? [Y/n]: " USE_EXISTING "Y"
-            case "${USE_EXISTING:-Y}" in
-                [Yy]*|"")
-                    ok "Reusing existing token."
-                    return
-                    ;;
-                *)
-                    warn "Will ask for a new token."
-                    ;;
-            esac
-        else
-            ok "Non-interactive mode — reusing existing token."
-            return
-        fi
+    # If .env already has a token, keep it (will be validated by token_gate)
+    if [ -f "$ENV_FILE" ] && grep -qE '^[[:space:]]*TELEGRAM_BOT_TOKEN[[:space:]]*=' "$ENV_FILE"; then
+        ok "Existing .env found — token will be validated before launch."
+        return
     fi
 
-    # ---- Ask for token ----
+    # Otherwise ask now
     echo
-    warn "Telegram Bot Token is REQUIRED for bot mode."
+    warn "Telegram Bot Token required. (Will be validated before launch.)"
     echo "  • Get one from @BotFather → /newbot"
     echo
-    ask "Paste your TELEGRAM_BOT_TOKEN: " TOKEN ""
+    ask "Paste your TELEGRAM_BOT_TOKEN (or leave blank to abort): " TOKEN ""
 
     if [ -z "${TOKEN:-}" ]; then
-        die "No token provided. Bot mode cannot start."
+        die "No token provided. Aborting."
     fi
 
     umask 077
@@ -364,7 +488,7 @@ setup_env_file() {
         echo "TELEGRAM_BOT_TOKEN=$TOKEN"
     } > "$ENV_FILE"
     chmod 600 "$ENV_FILE" 2>/dev/null || true
-    ok "Token saved to $ENV_FILE (permissions 600)."
+    ok "Token saved — will be validated before launch."
 }
 
 # ---------------------- Launcher ----------------------
@@ -377,7 +501,6 @@ cd "\$(dirname "\$0")"
 
 SCRIPT_NAME="$PY_SCRIPT"
 
-# Kill previous instance to avoid Telegram conflict
 if command -v pgrep >/dev/null 2>&1; then
     PIDS=\$(pgrep -f "\$SCRIPT_NAME" 2>/dev/null || true)
     if [ -n "\$PIDS" ]; then
@@ -389,7 +512,6 @@ if command -v pgrep >/dev/null 2>&1; then
     fi
 fi
 
-# Load .env
 if [ -f ".env" ]; then
     set -a
     # shellcheck disable=SC1091
@@ -397,7 +519,6 @@ if [ -f ".env" ]; then
     set +a
 fi
 
-# Activate venv if present
 if [ -f ".venv/bin/activate" ]; then
     # shellcheck disable=SC1091
     source .venv/bin/activate
@@ -427,6 +548,18 @@ main() {
     setup_env_file
     create_launcher
 
+    # ============================================================
+    #  VALIDATION GATE — before launch
+    # ============================================================
+    echo
+    log "═══════════════════════════════════════════════════════"
+    log "  Pre-launch token validation"
+    log "═══════════════════════════════════════════════════════"
+
+    if ! token_gate; then
+        die "Token validation failed. Not launching bot."
+    fi
+
     echo
     ok "Installation complete!"
     echo
@@ -437,7 +570,6 @@ main() {
     echo "  ${CYN}nano ~/.zip_cracker/.env${NC}                 # edit token"
     echo
 
-    # Wait for Telegram to release old session
     if command -v pgrep >/dev/null 2>&1 && pgrep -f "$PY_SCRIPT" >/dev/null 2>&1; then
         warn "Waiting 10s for Telegram to release the old session..."
         sleep 10
@@ -447,7 +579,6 @@ main() {
     ok "Starting bot (Ctrl+C to stop)..."
     echo
 
-    # Run bot in foreground
     exec "$INSTALL_DIR/run.sh" --bot
 }
 
