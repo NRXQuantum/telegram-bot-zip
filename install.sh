@@ -3,8 +3,11 @@
 #  Multi-Format Password Cracker — One-Line Installer
 #  Repo: https://github.com/NRXQuantum/telegram-bot-zip
 #
-#  Mode: Bot-only auto-start (web can be run manually later)
+#  Mode: Bot-only auto-start
 #  Supports: Termux, Debian/Ubuntu/Kali/Colab, Arch, Fedora, macOS
+#
+#  Usage:
+#    curl -fsSL https://raw.githubusercontent.com/NRXQuantum/telegram-bot-zip/main/install.sh | bash
 # ============================================================
 set -euo pipefail
 
@@ -66,11 +69,13 @@ run_as_root() {
 # ---------------------- Kill previous bot ----------------------
 kill_previous_bot() {
     if command -v pgrep >/dev/null 2>&1; then
+        local PIDS
         PIDS=$(pgrep -f "$PY_SCRIPT" 2>/dev/null || true)
         if [ -n "$PIDS" ]; then
             warn "Old instance(s) running: $PIDS — killing..."
             kill $PIDS 2>/dev/null || true
             sleep 2
+            local STILL
             STILL=$(pgrep -f "$PY_SCRIPT" 2>/dev/null || true)
             if [ -n "$STILL" ]; then
                 kill -9 $STILL 2>/dev/null || true
@@ -176,6 +181,7 @@ install_python_deps() {
     log "Setting up Python environment..."
     cd "$INSTALL_DIR"
 
+    # Ensure python3-venv available
     if ! python3 -m venv --help >/dev/null 2>&1; then
         warn "python3-venv missing — installing..."
         case "$ENV_TYPE" in
@@ -187,6 +193,7 @@ install_python_deps() {
         esac
     fi
 
+    # Clean broken venv
     if [ -d ".venv" ] && [ ! -f ".venv/bin/activate" ]; then
         warn "Broken .venv detected — removing."
         rm -rf .venv
@@ -296,20 +303,55 @@ fetch_script() {
     fi
 }
 
-# ---------------------- Token / .env ----------------------
+# ---------------------- Token / .env (ROBUST) ----------------------
 setup_env_file() {
     ENV_FILE="$INSTALL_DIR/.env"
+    local EXISTING_TOKEN=""
 
-    if [ -f "$ENV_FILE" ] && grep -q '^TELEGRAM_BOT_TOKEN=' "$ENV_FILE" 2>/dev/null; then
-        ok "Existing .env found — reusing token."
-        return
+    # ---- Robust extraction ----
+    # Ignores: comments (#), leading/trailing spaces, quotes, CR (\r)
+    if [ -f "$ENV_FILE" ]; then
+        EXISTING_TOKEN=$(
+            grep -E '^[[:space:]]*TELEGRAM_BOT_TOKEN[[:space:]]*=' "$ENV_FILE" 2>/dev/null \
+            | grep -v '^[[:space:]]*#' \
+            | head -n1 \
+            | sed -E 's/^[[:space:]]*TELEGRAM_BOT_TOKEN[[:space:]]*=[[:space:]]*//' \
+            | tr -d '\r\n' \
+            | sed -E 's/^"(.*)"$/\1/' \
+            | sed -E "s/^'(.*)'\$/\1/" \
+            | xargs 2>/dev/null || true
+        )
     fi
 
+    # ---- If valid token found, offer to reuse ----
+    if [ -n "$EXISTING_TOKEN" ] && [ "$EXISTING_TOKEN" != "your_token_here" ]; then
+        ok "Existing token found in $ENV_FILE"
+        local PREVIEW="${EXISTING_TOKEN:0:12}...${EXISTING_TOKEN: -4}"
+        echo "    Preview: $PREVIEW"
+        echo
+
+        if [ -t 1 ] && { [ -t 0 ] || [ -r /dev/tty ]; }; then
+            ask "Use this token? [Y/n]: " USE_EXISTING "Y"
+            case "${USE_EXISTING:-Y}" in
+                [Yy]*|"")
+                    ok "Reusing existing token."
+                    return
+                    ;;
+                *)
+                    warn "Will ask for a new token."
+                    ;;
+            esac
+        else
+            ok "Non-interactive mode — reusing existing token."
+            return
+        fi
+    fi
+
+    # ---- Ask for token ----
     echo
     warn "Telegram Bot Token is REQUIRED for bot mode."
     echo "  • Get one from @BotFather → /newbot"
     echo
-
     ask "Paste your TELEGRAM_BOT_TOKEN: " TOKEN ""
 
     if [ -z "${TOKEN:-}" ]; then
@@ -395,7 +437,7 @@ main() {
     echo "  ${CYN}nano ~/.zip_cracker/.env${NC}                 # edit token"
     echo
 
-    # Wait a moment for Telegram to clear old session
+    # Wait for Telegram to release old session
     if command -v pgrep >/dev/null 2>&1 && pgrep -f "$PY_SCRIPT" >/dev/null 2>&1; then
         warn "Waiting 10s for Telegram to release the old session..."
         sleep 10
@@ -405,7 +447,7 @@ main() {
     ok "Starting bot (Ctrl+C to stop)..."
     echo
 
-    # Run bot in the foreground
+    # Run bot in foreground
     exec "$INSTALL_DIR/run.sh" --bot
 }
 
