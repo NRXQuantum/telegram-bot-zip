@@ -1,9 +1,10 @@
-# Secrets
+# === Secrets (NEVER push these) ===
+config.py
 .env
 *.env
 !.env.example
 
-# Python
+# === Python ===
 __pycache__/
 *.py[cod]
 *.pyc
@@ -12,13 +13,13 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 
-# Virtual environments
+# === Virtual environments ===
 .venv/
 venv/
 env/
 ENV/
 
-# Runtime
+# === Runtime ===
 unzipped/
 extracted/
 temp_*/
@@ -27,11 +28,12 @@ web_job_*/
 cracker.log
 *.log
 
-# OS
+# === OS ===
 .DS_Store
 Thumbs.db
+desktop.ini
 
-# Editors
+# === Editors ===
 .vscode/
 .idea/
 *.swp
