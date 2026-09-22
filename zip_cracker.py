@@ -3,12 +3,18 @@
 Multi-Format Password Cracker (ZIP / RAR / 7z / PDF)
 Modes: CLI, Telegram Bot, Web Interface
 Coded by rebnX — Extended + Security Hardened
-
-Token loading priority:
-  1. config.py  (TELEGRAM_BOT_TOKEN = "...")
-  2. Environment variable TELEGRAM_BOT_TOKEN
-  3. .env file
 """
+
+# ══════════════════════════════════════════════════════════════
+#  🔑 TELEGRAM BOT TOKEN — এখানে আপনার টোকেন বসান
+# ══════════════════════════════════════════════════════════════
+TELEGRAM_BOT_TOKEN = "8840306599:AAGQsAzRhftywjWELB6NNX1xc5jMvWOkG4Y"
+
+# ⚠️  সতর্কতা:
+#     GitHub-এ push করার আগে এই লাইনটা খালি করুন:
+#     TELEGRAM_BOT_TOKEN = ""
+#     অথবা .gitignore-এ zip_cracker.py রাখুন (না করাই ভালো)
+# ══════════════════════════════════════════════════════════════
 
 import os
 import sys
@@ -88,6 +94,7 @@ MAX_CRC_FILE_SIZE = 3
 CHUNK_SIZE = 1_000_000
 MASK_CHUNK_SIZE = 100_000
 MAX_MASK_COMBINATIONS = 100_000_000_000
+DEFAULT_PORT = 5000
 
 CHARSET_DIGITS = string.digits
 CHARSET_LOWER = string.ascii_lowercase
@@ -103,6 +110,7 @@ MASK_PLACEHOLDERS = {
 }
 
 SUPPORTED_EXTS = {'.zip', '.rar', '.7z', '.pdf'}
+
 
 # ============================== Logging ============================
 logger = logging.getLogger("zip_cracker")
@@ -131,95 +139,44 @@ def log_error(msg: str) -> None:
     logger.error(msg)
 
 
-# ============================== Token loader ============================
-def _load_config_module() -> Dict[str, Any]:
-    """
-    Import config.py from (in order):
-      1. Script directory
-      2. ~/.zip_cracker/
-    Returns dict of all UPPERCASE settings found.
-    """
-    import importlib.util
-
-    candidates = [
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.py"),
-        os.path.expanduser("~/.zip_cracker/config.py"),
-    ]
-
-    for path in candidates:
-        if not os.path.isfile(path):
-            continue
-        try:
-            spec = importlib.util.spec_from_file_location("_zc_config", path)
-            if spec is None or spec.loader is None:
-                continue
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-
-            cfg: Dict[str, Any] = {}
-            for name in dir(module):
-                if name.isupper() and not name.startswith("_"):
-                    cfg[name] = getattr(module, name)
-            log_info(f"[*] Loaded config.py from {path}")
-            return cfg
-        except Exception as e:
-            log_info(f"[!] Failed to load {path}: {e}")
-            continue
-
-    return {}
-
-
-def _load_dotenv() -> None:
-    """Legacy: load key=value pairs from .env if present."""
-    candidates = [
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
-        os.path.expanduser("~/.zip_cracker/.env"),
-    ]
-    for env_path in candidates:
-        if not os.path.isfile(env_path):
-            continue
-        try:
-            with open(env_path, "r", encoding="utf-8") as f:
-                for raw in f:
-                    line = raw.strip()
-                    if not line or line.startswith("#") or "=" not in line:
-                        continue
-                    key, val = line.split("=", 1)
-                    key = key.strip()
-                    val = val.strip().strip('"').strip("'")
-                    if key and val and key not in os.environ:
-                        os.environ[key] = val
-            return
-        except Exception:
-            continue
-
-
+# ============================== Token getter ============================
 def _get_bot_token() -> str:
     """
+    Return the bot token.
     Priority:
-      1. config.py  (TELEGRAM_BOT_TOKEN = "...")
-      2. Environment variable
+      1. Hardcoded TELEGRAM_BOT_TOKEN at top of this file
+      2. Environment variable TELEGRAM_BOT_TOKEN
       3. .env file
     """
-    # 1. config.py
-    cfg = _load_config_module()
-    token = (cfg.get("TELEGRAM_BOT_TOKEN") or "").strip()
-
-    # 2. env var
+    token = (TELEGRAM_BOT_TOKEN or "").strip()
     if not token or token == "PASTE_YOUR_TOKEN_HERE":
         token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
 
-    # 3. .env
-    if not token or token == "PASTE_YOUR_TOKEN_HERE":
-        _load_dotenv()
-        token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+    if not token:
+        # Last resort: .env
+        for p in [
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
+            os.path.expanduser("~/.zip_cracker/.env"),
+        ]:
+            if not os.path.isfile(p):
+                continue
+            try:
+                for raw in open(p, encoding="utf-8"):
+                    line = raw.strip()
+                    if line.startswith("TELEGRAM_BOT_TOKEN="):
+                        token = line.split("=", 1)[1].strip().strip('"').strip("'")
+                        break
+                if token:
+                    break
+            except Exception:
+                continue
 
     if not token or token == "PASTE_YOUR_TOKEN_HERE":
         log_error(
-            "[!] Telegram Bot Token not found.\n"
-            "    Option 1: Edit config.py and set TELEGRAM_BOT_TOKEN\n"
-            "    Option 2: export TELEGRAM_BOT_TOKEN=your_token\n"
-            "    Option 3: Create .env with TELEGRAM_BOT_TOKEN=your_token"
+            "[!] No Telegram Bot Token found.\n"
+            "    Edit the TELEGRAM_BOT_TOKEN line at the top of this file.\n"
+            "    Or export TELEGRAM_BOT_TOKEN=your_token\n"
+            "    Or create .env with TELEGRAM_BOT_TOKEN=your_token"
         )
         sys.exit(1)
 
@@ -227,7 +184,7 @@ def _get_bot_token() -> str:
 
 
 def _validate_bot_token(token: str) -> Optional[str]:
-    """Return bot username if token is valid, else None."""
+    """Return bot username if valid, else None."""
     try:
         import urllib.request as _u
         import json as _j
@@ -1260,7 +1217,7 @@ def parse_arguments():
         return {}
     args = {'file': None, 'out_dir': OUT_DIR_DEFAULT, 'dict_path': None,
             'mask': None, 'numeric': False, 'bot': False, 'web': False,
-            'port': 5000, 'all': False, 'threads': None,
+            'port': DEFAULT_PORT, 'all': False, 'threads': None,
             'no_extract': False, 'log': None}
     i = 1
     argv = sys.argv
@@ -1416,16 +1373,6 @@ def main():
         args = parse_arguments()
         setup_logging(args.get('log'))
 
-        # Load config.py first (also gives us any custom defaults)
-        cfg = _load_config_module()
-
-        # Allow config.py to set DEFAULT_PORT if CLI didn't override
-        if 'DEFAULT_PORT' in cfg and args.get('port', 5000) == 5000:
-            try:
-                args['port'] = int(cfg['DEFAULT_PORT'])
-            except (ValueError, TypeError):
-                pass
-
         # CLI-only mode
         if not (args.get('bot') or args.get('web') or args.get('all')):
             main_cli(args)
@@ -1437,7 +1384,7 @@ def main():
         if (args.get('web') or args.get('all')) and not FLASK_AVAILABLE:
             log_error("[!] Flask missing."); sys.exit(1)
 
-        port = args.get('port', 5000)
+        port = args.get('port', DEFAULT_PORT)
 
         # Start cleanup thread
         threading.Thread(target=cleanup_worker, name="Cleanup",
