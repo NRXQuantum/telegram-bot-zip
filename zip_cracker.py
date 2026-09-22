@@ -3,6 +3,11 @@
 Multi-Format Password Cracker (ZIP / RAR / 7z / PDF)
 Modes: CLI, Telegram Bot, Web Interface
 Coded by rebnX — Extended + Security Hardened
+
+Token loading priority:
+  1. config.py  (TELEGRAM_BOT_TOKEN = "...")
+  2. Environment variable TELEGRAM_BOT_TOKEN
+  3. .env file
 """
 
 import os
@@ -31,6 +36,7 @@ try:
 except ImportError:
     FLASK_AVAILABLE = False
     Flask = None
+
     def secure_filename(name: str) -> str:
         name = (name or "").replace("\x00", "")
         name = os.path.basename(name)
@@ -101,6 +107,7 @@ SUPPORTED_EXTS = {'.zip', '.rar', '.7z', '.pdf'}
 # ============================== Logging ============================
 logger = logging.getLogger("zip_cracker")
 
+
 def setup_logging(log_file: Optional[str] = None) -> None:
     logger.setLevel(logging.INFO)
     logger.handlers.clear()
@@ -115,15 +122,55 @@ def setup_logging(log_file: Optional[str] = None) -> None:
             "%(asctime)s [%(levelname)s] %(threadName)s: %(message)s"))
         logger.addHandler(fh)
 
+
 def log_info(msg: str) -> None:
     logger.info(msg)
+
 
 def log_error(msg: str) -> None:
     logger.error(msg)
 
-# ============================== .env auto-loader ============================
+
+# ============================== Token loader ============================
+def _load_config_module() -> Dict[str, Any]:
+    """
+    Import config.py from (in order):
+      1. Script directory
+      2. ~/.zip_cracker/
+    Returns dict of all UPPERCASE settings found.
+    """
+    import importlib.util
+
+    candidates = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.py"),
+        os.path.expanduser("~/.zip_cracker/config.py"),
+    ]
+
+    for path in candidates:
+        if not os.path.isfile(path):
+            continue
+        try:
+            spec = importlib.util.spec_from_file_location("_zc_config", path)
+            if spec is None or spec.loader is None:
+                continue
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+
+            cfg: Dict[str, Any] = {}
+            for name in dir(module):
+                if name.isupper() and not name.startswith("_"):
+                    cfg[name] = getattr(module, name)
+            log_info(f"[*] Loaded config.py from {path}")
+            return cfg
+        except Exception as e:
+            log_info(f"[!] Failed to load {path}: {e}")
+            continue
+
+    return {}
+
+
 def _load_dotenv() -> None:
-    """Load key=value pairs from .env (script-dir or ~/.zip_cracker/.env)."""
+    """Legacy: load key=value pairs from .env if present."""
     candidates = [
         os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
         os.path.expanduser("~/.zip_cracker/.env"),
@@ -146,23 +193,41 @@ def _load_dotenv() -> None:
         except Exception:
             continue
 
+
 def _get_bot_token() -> str:
-    """Return TELEGRAM_BOT_TOKEN or exit with a clear message."""
-    _load_dotenv()
-    token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+    """
+    Priority:
+      1. config.py  (TELEGRAM_BOT_TOKEN = "...")
+      2. Environment variable
+      3. .env file
+    """
+    # 1. config.py
+    cfg = _load_config_module()
+    token = (cfg.get("TELEGRAM_BOT_TOKEN") or "").strip()
+
+    # 2. env var
+    if not token or token == "PASTE_YOUR_TOKEN_HERE":
+        token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+
+    # 3. .env
+    if not token or token == "PASTE_YOUR_TOKEN_HERE":
+        _load_dotenv()
+        token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+
     if not token or token == "PASTE_YOUR_TOKEN_HERE":
         log_error(
-            "[!] TELEGRAM_BOT_TOKEN not set.\n"
-            "    Create ~/.zip_cracker/.env with:\n"
-            "        TELEGRAM_BOT_TOKEN=your_bot_token_here\n"
-            "    Or set env var:\n"
-            "        export TELEGRAM_BOT_TOKEN=your_bot_token_here"
+            "[!] Telegram Bot Token not found.\n"
+            "    Option 1: Edit config.py and set TELEGRAM_BOT_TOKEN\n"
+            "    Option 2: export TELEGRAM_BOT_TOKEN=your_token\n"
+            "    Option 3: Create .env with TELEGRAM_BOT_TOKEN=your_token"
         )
         sys.exit(1)
+
     return token
 
+
 def _validate_bot_token(token: str) -> Optional[str]:
-    """Return bot username if token valid, else None."""
+    """Return bot username if token is valid, else None."""
     try:
         import urllib.request as _u
         import json as _j
@@ -174,11 +239,23 @@ def _validate_bot_token(token: str) -> Optional[str]:
         log_info(f"[!] Token validation failed: {e}")
     return None
 
+
 # ============================== Exceptions ============================
-class CrackerError(Exception): pass
-class DictionaryError(CrackerError): pass
-class UnsupportedFormatError(CrackerError): pass
-class MissingLibraryError(CrackerError): pass
+class CrackerError(Exception):
+    pass
+
+
+class DictionaryError(CrackerError):
+    pass
+
+
+class UnsupportedFormatError(CrackerError):
+    pass
+
+
+class MissingLibraryError(CrackerError):
+    pass
+
 
 # ============================== Cleanup ============================
 CLEANUP_INTERVAL = 3600
@@ -186,10 +263,12 @@ IDLE_TIMEOUT = 3600
 last_activity_time = time.time()
 cleanup_lock = threading.Lock()
 
+
 def update_activity() -> None:
     global last_activity_time
     with cleanup_lock:
         last_activity_time = time.time()
+
 
 def cleanup_old_temp_dirs() -> None:
     now = time.time()
@@ -229,6 +308,7 @@ def cleanup_old_temp_dirs() -> None:
     except OSError:
         pass
 
+
 def cleanup_worker() -> None:
     while True:
         time.sleep(CLEANUP_INTERVAL)
@@ -240,6 +320,7 @@ def cleanup_worker() -> None:
             except Exception:
                 pass
 
+
 # ============================== Helpers ============================
 def safe_name(name: str) -> str:
     if not name:
@@ -249,8 +330,10 @@ def safe_name(name: str) -> str:
     name = name.replace("/", "_").replace("\\", "_").strip().lstrip(".")
     return name or "upload"
 
+
 def safe_ext(name: str) -> str:
     return os.path.splitext(safe_name(name))[1].lower()
+
 
 # ============================== ZIP checkers ============================
 class ZipEncryptionChecker:
@@ -274,6 +357,7 @@ class ZipEncryptionChecker:
                 if clean_info.flag_bits & 0x1:
                     clean_info.flag_bits ^= 0x1
                 target_zf.writestr(clean_info, source_zf.read(info.filename))
+
 
 # ============================== CRC ============================
 class CRCCracker:
@@ -304,6 +388,7 @@ class CRCCracker:
                 return True
         return False
 
+
 # ============================== ZIP extract ============================
 def find_first_file(zf) -> Optional[str]:
     try:
@@ -319,6 +404,7 @@ def find_first_file(zf) -> Optional[str]:
     except Exception:
         pass
     return None
+
 
 class PasswordCracker:
     def __init__(self, zip_file: str, out_dir: str):
@@ -342,6 +428,7 @@ class PasswordCracker:
             callback(f"[*] Extracted {len(names)} file(s)")
         return names
 
+
 # ============================== Format crackers ============================
 def _zip_verify(file_path, password) -> bool:
     pwd_bytes = password.encode('utf-8')
@@ -364,6 +451,7 @@ def _zip_verify(file_path, password) -> bool:
     except Exception:
         return False
 
+
 def _rar_verify(file_path, password) -> bool:
     if not HAS_RARFILE:
         raise MissingLibraryError("rarfile not installed")
@@ -375,6 +463,7 @@ def _rar_verify(file_path, password) -> bool:
     except Exception:
         return False
 
+
 def _7z_verify(file_path, password) -> bool:
     if not HAS_PY7ZR:
         raise MissingLibraryError("py7zr not installed")
@@ -385,6 +474,7 @@ def _7z_verify(file_path, password) -> bool:
         return True
     except Exception:
         return False
+
 
 def _pdf_verify(file_path, password) -> bool:
     if not HAS_PYPDF2:
@@ -398,6 +488,7 @@ def _pdf_verify(file_path, password) -> bool:
     except Exception:
         return False
 
+
 class FormatCrackerFactory:
     @staticmethod
     def get_cracker(ext):
@@ -407,6 +498,7 @@ class FormatCrackerFactory:
             '.7z':  _7z_verify,
             '.pdf': _pdf_verify,
         }.get(ext.lower())
+
 
 # ============================== Attack state ============================
 class AttackStatus:
@@ -443,6 +535,7 @@ class AttackStatus:
         with self.lock:
             return self.last_status
 
+
 class ProgressDisplay:
     def __init__(self, status, start_time, callback=None):
         self.status = status
@@ -452,7 +545,8 @@ class ProgressDisplay:
         self.thread = None
 
     def start(self):
-        self.thread = threading.Thread(target=self._loop, name="ProgressDisplay", daemon=True)
+        self.thread = threading.Thread(
+            target=self._loop, name="ProgressDisplay", daemon=True)
         self.thread.start()
 
     def stop(self):
@@ -487,6 +581,7 @@ class ProgressDisplay:
         else:
             print(f"\r[-] {msg}", end="", flush=True)
 
+
 # ============================== Mask / dict ============================
 class MaskParser:
     @staticmethod
@@ -497,7 +592,7 @@ class MaskParser:
             if mask[i] == '?':
                 if i + 1 < len(mask):
                     ph = mask[i + 1]
-                    charsets.append(MASK_PLACEHOLDERS.get(ph, mask[i:i+2]))
+                    charsets.append(MASK_PLACEHOLDERS.get(ph, mask[i:i + 2]))
                     i += 2
                 else:
                     charsets.append('?')
@@ -510,6 +605,7 @@ class MaskParser:
             if len(cs) > 0:
                 total *= len(cs)
         return charsets, max(total, 1)
+
 
 class DictionaryGenerator:
     @staticmethod
@@ -544,6 +640,7 @@ class DictionaryGenerator:
                 return sum(1 for _ in f)
         except OSError:
             return 0
+
 
 # ============================== Attack engine ============================
 class AttackEngine:
@@ -620,7 +717,8 @@ class AttackEngine:
 
     def attack_with_mask(self, mask):
         charsets, total = MaskParser.parse(mask)
-        self._log(f"\n[+] Mask: '{mask}' — {total:,} combinations, {self.max_threads} threads")
+        self._log(f"\n[+] Mask: '{mask}' — {total:,} combinations, "
+                  f"{self.max_threads} threads")
         self.status.total_passwords = total
         progress = ProgressDisplay(self.status, time.time(), callback=self._log)
         progress.start()
@@ -641,7 +739,8 @@ class AttackEngine:
     def attack_with_dictionary(self, dict_path, dict_name="Dictionary"):
         try:
             total = DictionaryGenerator.count_passwords(dict_path)
-            self._log(f"\n[+] {dict_name}: {dict_path} ({total:,} passwords), {self.max_threads} threads")
+            self._log(f"\n[+] {dict_name}: {dict_path} "
+                      f"({total:,} passwords), {self.max_threads} threads")
             self.status.total_passwords = total
             progress = ProgressDisplay(self.status, time.time(), callback=self._log)
             progress.start()
@@ -661,7 +760,8 @@ class AttackEngine:
 
     def attack_with_numeric(self, min_len=1, max_len=6):
         total = DictionaryGenerator.numeric_total(min_len, max_len)
-        self._log(f"\n[+] Numeric {min_len}-{max_len} digits ({total:,}), {self.max_threads} threads")
+        self._log(f"\n[+] Numeric {min_len}-{max_len} digits "
+                  f"({total:,}), {self.max_threads} threads")
         self.status.total_passwords = total
         progress = ProgressDisplay(self.status, time.time(), callback=self._log)
         progress.start()
@@ -688,10 +788,11 @@ class AttackEngine:
                     return
                 self.attack_with_directory(os.path.join(dir_path, filename))
 
+
 # ============================== Web interface ============================
 if FLASK_AVAILABLE:
     app = Flask(__name__)
-    jobs = {}
+    jobs: Dict[str, Dict[str, Any]] = {}
     jobs_lock = threading.Lock()
     JOB_TTL = 3600
 
@@ -725,7 +826,8 @@ if FLASK_AVAILABLE:
                     with zipfile.ZipFile(file_path) as zf:
                         zf.extractall(path=out_dir)
                         names = zf.namelist()
-                    _finish_job(job_id, {'password': None, 'files': names, 'error': None})
+                    _finish_job(job_id, {'password': None, 'files': names,
+                                         'error': None})
                     return
                 fixed = f"{file_path}.{uuid.uuid4().hex}.fixed.tmp"
                 try:
@@ -736,7 +838,8 @@ if FLASK_AVAILABLE:
                     with zipfile.ZipFile(fixed) as zf:
                         zf.extractall(path=out_dir)
                         names = zf.namelist()
-                    _finish_job(job_id, {'password': None, 'files': names, 'error': None})
+                    _finish_job(job_id, {'password': None, 'files': names,
+                                         'error': None})
                     return
                 except Exception:
                     pass
@@ -748,6 +851,7 @@ if FLASK_AVAILABLE:
                             pass
 
             status_obj = AttackStatus()
+
             def cb(msg):
                 status_obj.set_last_status(msg)
                 with jobs_lock:
@@ -770,7 +874,8 @@ if FLASK_AVAILABLE:
 
             if engine.found_password:
                 _finish_job(job_id, {'password': engine.found_password,
-                                     'files': engine.extracted_files, 'error': None})
+                                     'files': engine.extracted_files,
+                                     'error': None})
             else:
                 _finish_job(job_id, {'password': None, 'files': [],
                                      'error': 'Password not found.'})
@@ -877,22 +982,25 @@ if FLASK_AVAILABLE:
             if job is None:
                 return jsonify({'status': 'unknown'}), 404
             if job['status'] == 'running':
-                return jsonify({'status': 'running', 'progress': job.get('progress', '')})
+                return jsonify({'status': 'running',
+                                'progress': job.get('progress', '')})
             return jsonify({'status': 'done', 'result': job['result']})
 
     def run_web_server(port=5000):
         log_info(f"[*] Web server on http://0.0.0.0:{port}")
-        app.run(host='0.0.0.0', port=port, debug=False, threaded=True, use_reloader=False)
+        app.run(host='0.0.0.0', port=port, debug=False,
+                threaded=True, use_reloader=False)
+
 
 # ============================== Telegram bot ============================
 if TELEGRAM_AVAILABLE:
     class ZipCrackerBot:
-        def __init__(self, token):
+        def __init__(self, token: str):
             if not token:
                 raise ValueError("Token required")
             self.token = token
             self.application = Application.builder().token(token).build()
-            self.user_data = {}
+            self.user_data: Dict[int, Dict[str, Any]] = {}
             self._register_handlers()
 
         def _register_handlers(self):
@@ -901,7 +1009,8 @@ if TELEGRAM_AVAILABLE:
             self.application.add_handler(CommandHandler("status", self.cmd_status))
             self.application.add_handler(CommandHandler("numeric", self.cmd_numeric))
             self.application.add_handler(CommandHandler("default", self.cmd_default))
-            self.application.add_handler(MessageHandler(filters.Document.ALL, self.handle_doc))
+            self.application.add_handler(
+                MessageHandler(filters.Document.ALL, self.handle_doc))
 
         async def cmd_start(self, update, context):
             await update.message.reply_text(
@@ -924,7 +1033,8 @@ if TELEGRAM_AVAILABLE:
             st = self.user_data.get(uid, {}).get('status')
             if st:
                 last = st.get_last_status()
-                await update.message.reply_text(f"📊 {last}" if last else "⏳ Started...")
+                await update.message.reply_text(f"📊 {last}" if last
+                                                else "⏳ Started...")
             else:
                 await update.message.reply_text("❌ No active job.")
 
@@ -955,7 +1065,8 @@ if TELEGRAM_AVAILABLE:
                 f = await doc.get_file()
                 await f.download_to_drive(dict_path)
                 self.user_data[uid]['dict_file'] = dict_path
-                await update.message.reply_text(f"✅ Dictionary '{clean_name}' saved. Send target.")
+                await update.message.reply_text(
+                    f"✅ Dictionary '{clean_name}' saved. Send target.")
                 return
 
             if ext not in SUPPORTED_EXTS:
@@ -981,7 +1092,8 @@ if TELEGRAM_AVAILABLE:
                     if dict_file:
                         custom_dict = dict_file
                     else:
-                        await update.message.reply_text("❌ Upload a .txt first.")
+                        await update.message.reply_text(
+                            "❌ Upload a .txt first.")
                         return
 
             mode = self.user_data[uid].get('mode', 'default')
@@ -992,10 +1104,12 @@ if TELEGRAM_AVAILABLE:
             f = await doc.get_file()
             await f.download_to_drive(file_path)
 
-            await update.message.reply_text("🔍 Cracking... (/status for updates)")
+            await update.message.reply_text(
+                "🔍 Cracking... (/status for updates)")
 
             out_dir = os.path.join(temp_dir, "extracted")
-            result = {'password': None, 'files': [], 'error': None, 'finished': False}
+            result = {'password': None, 'files': [], 'error': None,
+                      'finished': False}
             status_obj = AttackStatus()
             self.user_data[uid]['status'] = status_obj
 
@@ -1043,7 +1157,8 @@ if TELEGRAM_AVAILABLE:
                         engine.attack_with_dictionary(dict_file, "Uploaded")
                     else:
                         if os.path.exists('password_list.txt'):
-                            engine.attack_with_dictionary('password_list.txt', "Built-in")
+                            engine.attack_with_dictionary(
+                                'password_list.txt', "Built-in")
                         if mode == 'numeric' and not engine.found_password:
                             engine.attack_with_numeric(1, 6)
 
@@ -1057,7 +1172,8 @@ if TELEGRAM_AVAILABLE:
                     result['error'] = str(e)
                     result['finished'] = True
 
-            threading.Thread(target=crack_task, name=f"BotCrack-{uid}", daemon=True).start()
+            threading.Thread(target=crack_task,
+                             name=f"BotCrack-{uid}", daemon=True).start()
             chat_id = update.effective_chat.id
 
             async def auto_status():
@@ -1104,6 +1220,7 @@ if TELEGRAM_AVAILABLE:
             log_info("[*] Starting Telegram bot (long polling)...")
             self.application.run_polling()
 
+
 # ============================== CLI ============================
 def print_banner():
     print(r"""
@@ -1114,6 +1231,7 @@ def print_banner():
     /____|_| .__/      \____|_|  \__,_|\___|_|\_\___|_|
            |_|        Coded by rebnX
     """)
+
 
 def print_usage():
     p = sys.argv[0]
@@ -1136,6 +1254,7 @@ Other modes:
   python {p} --all      Bot + Web
 """)
 
+
 def parse_arguments():
     if len(sys.argv) < 2:
         return {}
@@ -1147,7 +1266,8 @@ def parse_arguments():
     argv = sys.argv
     while i < len(argv):
         a = argv[i]
-        if a == '--bot': args['bot'] = True; i += 1
+        if a == '--bot':
+            args['bot'] = True; i += 1
         elif a == '--web':
             args['web'] = True; i += 1
             if i < len(argv) and argv[i].isdigit():
@@ -1157,32 +1277,46 @@ def parse_arguments():
             if i < len(argv) and argv[i].isdigit():
                 args['port'] = int(argv[i]); i += 1
         elif a == '--port':
-            if i + 1 < len(argv) and argv[i+1].isdigit():
-                args['port'] = int(argv[i+1]); i += 2
+            if i + 1 < len(argv) and argv[i + 1].isdigit():
+                args['port'] = int(argv[i + 1]); i += 2
             else:
                 print("[!] --port needs a number"); sys.exit(1)
-        elif a == '--numeric': args['numeric'] = True; i += 1
-        elif a == '--no-extract': args['no_extract'] = True; i += 1
+        elif a == '--numeric':
+            args['numeric'] = True; i += 1
+        elif a == '--no-extract':
+            args['no_extract'] = True; i += 1
         elif a == '--threads':
             if i + 1 < len(argv):
-                try: args['threads'] = int(argv[i+1])
-                except ValueError: print("[!] --threads needs number"); sys.exit(1)
+                try:
+                    args['threads'] = int(argv[i + 1])
+                except ValueError:
+                    print("[!] --threads needs number"); sys.exit(1)
                 i += 2
-            else: print("[!] --threads needs value"); sys.exit(1)
+            else:
+                print("[!] --threads needs value"); sys.exit(1)
         elif a == '--log':
-            if i + 1 < len(argv): args['log'] = argv[i+1]; i += 2
-            else: print("[!] --log needs filename"); sys.exit(1)
+            if i + 1 < len(argv):
+                args['log'] = argv[i + 1]; i += 2
+            else:
+                print("[!] --log needs filename"); sys.exit(1)
         elif a in ('-o', '--out'):
-            if i + 1 < len(argv): args['out_dir'] = argv[i+1]; i += 2
-            else: print("[!] -o needs dir"); sys.exit(1)
+            if i + 1 < len(argv):
+                args['out_dir'] = argv[i + 1]; i += 2
+            else:
+                print("[!] -o needs dir"); sys.exit(1)
         elif a in ('-m', '--mask'):
-            if i + 1 < len(argv): args['mask'] = argv[i+1]; i += 2
-            else: print("[!] -m needs mask"); sys.exit(1)
+            if i + 1 < len(argv):
+                args['mask'] = argv[i + 1]; i += 2
+            else:
+                print("[!] -m needs mask"); sys.exit(1)
         else:
-            if args['file'] is None: args['file'] = a
-            elif args['dict_path'] is None: args['dict_path'] = a
+            if args['file'] is None:
+                args['file'] = a
+            elif args['dict_path'] is None:
+                args['dict_path'] = a
             i += 1
     return args
+
 
 def main_cli(args):
     file_path = args.get('file')
@@ -1229,8 +1363,10 @@ def main_cli(args):
             log_info("[+] Truly encrypted. Cracking...")
         finally:
             if os.path.exists(fixed):
-                try: os.remove(fixed)
-                except OSError: pass
+                try:
+                    os.remove(fixed)
+                except OSError:
+                    pass
 
         try:
             with zipfile.ZipFile(file_path) as zf:
@@ -1261,13 +1397,16 @@ def main_cli(args):
     else:
         log_info(f"\n[+] Password: {engine.found_password}")
 
+
 # ============================== Main ============================
 _shutdown_event = threading.Event()
+
 
 def _sigint(signum, frame):
     if not _shutdown_event.is_set():
         print("\n[!] Shutting down...")
         _shutdown_event.set()
+
 
 def main():
     try:
@@ -1276,51 +1415,70 @@ def main():
         print_banner()
         args = parse_arguments()
         setup_logging(args.get('log'))
-        _load_dotenv()
 
+        # Load config.py first (also gives us any custom defaults)
+        cfg = _load_config_module()
+
+        # Allow config.py to set DEFAULT_PORT if CLI didn't override
+        if 'DEFAULT_PORT' in cfg and args.get('port', 5000) == 5000:
+            try:
+                args['port'] = int(cfg['DEFAULT_PORT'])
+            except (ValueError, TypeError):
+                pass
+
+        # CLI-only mode
         if not (args.get('bot') or args.get('web') or args.get('all')):
             main_cli(args)
             return
 
+        # Library checks
         if (args.get('bot') or args.get('all')) and not TELEGRAM_AVAILABLE:
             log_error("[!] python-telegram-bot missing."); sys.exit(1)
         if (args.get('web') or args.get('all')) and not FLASK_AVAILABLE:
             log_error("[!] Flask missing."); sys.exit(1)
 
         port = args.get('port', 5000)
-        threading.Thread(target=cleanup_worker, name="Cleanup", daemon=True).start()
 
+        # Start cleanup thread
+        threading.Thread(target=cleanup_worker, name="Cleanup",
+                         daemon=True).start()
+
+        # Web in background
         if args.get('web') or args.get('all'):
             threading.Thread(target=run_web_server, args=(port,),
                              name="WebServer", daemon=True).start()
 
+        # Bot in main thread
         if args.get('bot') or args.get('all'):
             token = _get_bot_token()
             uname = _validate_bot_token(token)
             if uname:
                 log_info(f"[*] Token OK: @{uname}")
             else:
-                log_error("[!] Token validation failed.")
+                log_error("[!] Token validation failed against Telegram API.")
                 if not args.get('web'):
                     sys.exit(1)
             else:
                 bot = ZipCrackerBot(token)
-                log_info("[*] Starting bot in main thread...")
-                bot.run()
+                log_info("[*] Starting Telegram bot in main thread...")
+                bot.run()  # blocks
                 return
 
+        # Web-only: keep alive
         try:
             while not _shutdown_event.is_set():
                 time.sleep(1)
         except KeyboardInterrupt:
             pass
         log_info("[!] Shutdown complete.")
+
     except KeyboardInterrupt:
         print("\n[!] Interrupted.")
     except Exception as e:
         log_error(f"\n[!] Error: {e}")
         import traceback
         traceback.print_exc()
+
 
 if __name__ == '__main__':
     main()
