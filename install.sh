@@ -3,17 +3,14 @@
 #  Multi-Format Password Cracker — One-Line Installer
 #  Repo: https://github.com/NRXQuantum/telegram-bot-zip
 #
+#  Mode: Bot-only auto-start (web can be run manually later)
 #  Supports: Termux, Debian/Ubuntu/Kali/Colab, Arch, Fedora, macOS
-#
-#  Usage:
-#    curl -fsSL https://raw.githubusercontent.com/NRXQuantum/telegram-bot-zip/main/install.sh | bash
 # ============================================================
 set -euo pipefail
 
 # ---------------------- Config ----------------------
 REPO_RAW="${REPO_RAW:-https://raw.githubusercontent.com/NRXQuantum/telegram-bot-zip/main}"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.zip_cracker}"
-PORT="${PORT:-5000}"
 PY_SCRIPT="zip_cracker.py"
 DICT_FILE="password_list.txt"
 
@@ -42,7 +39,7 @@ EOF
 echo
 }
 
-# ---------------------- Interactive ask (works via curl | bash) ----------------------
+# ---------------------- Ask (works via curl | bash) ----------------------
 ask() {
     local prompt="$1" varname="$2" default="${3:-}" ans=""
     if [ -t 0 ]; then
@@ -55,8 +52,7 @@ ask() {
     eval "$varname=\$ans"
 }
 
-# ---------------------- Root / sudo detection ----------------------
-# Colab and Docker containers run as root with no sudo.
+# ---------------------- Root / sudo helper ----------------------
 run_as_root() {
     if [ "$(id -u)" -eq 0 ]; then
         "$@"
@@ -64,6 +60,23 @@ run_as_root() {
         sudo "$@"
     else
         "$@"
+    fi
+}
+
+# ---------------------- Kill previous bot ----------------------
+kill_previous_bot() {
+    if command -v pgrep >/dev/null 2>&1; then
+        PIDS=$(pgrep -f "$PY_SCRIPT" 2>/dev/null || true)
+        if [ -n "$PIDS" ]; then
+            warn "Old instance(s) running: $PIDS — killing..."
+            kill $PIDS 2>/dev/null || true
+            sleep 2
+            STILL=$(pgrep -f "$PY_SCRIPT" 2>/dev/null || true)
+            if [ -n "$STILL" ]; then
+                kill -9 $STILL 2>/dev/null || true
+            fi
+            ok "Previous instance cleared."
+        fi
     fi
 }
 
@@ -84,7 +97,6 @@ detect_env() {
     fi
     ok "Environment: $ENV_TYPE"
 
-    # Warn if Colab
     if [ -d "/content" ] && [ "$(id -u)" -eq 0 ]; then
         warn "Detected Google Colab / Docker root environment."
     fi
@@ -100,12 +112,11 @@ ensure_python() {
             arch)    run_as_root pacman -Sy --noconfirm python ;;
             fedora)  run_as_root dnf install -y python3 ;;
             macos)   brew install python ;;
-            *)       die "python3 not found. Install it manually." ;;
+            *)       die "python3 not found. Install manually." ;;
         esac
     fi
     ok "Python: $(python3 --version 2>&1)"
 
-    # Ensure pip module
     if ! python3 -m pip --version >/dev/null 2>&1; then
         log "pip missing — installing..."
         case "$ENV_TYPE" in
@@ -119,7 +130,7 @@ ensure_python() {
     fi
 }
 
-# ---------------------- Install system packages ----------------------
+# ---------------------- System packages ----------------------
 install_system_deps() {
     log "Installing system dependencies..."
     case "$ENV_TYPE" in
@@ -127,17 +138,15 @@ install_system_deps() {
             pkg update -y >/dev/null 2>&1 || true
             pkg install -y python unrar p7zip clang make libffi openssl \
                 python-psutil >/dev/null 2>&1 || \
-                warn "Some termux packages failed (continuing)"
+                warn "Some termux packages failed"
             ;;
         debian)
-            # Colab-এ apt-get সরাসরি চলে; অন্যথায় sudo লাগবে
             run_as_root apt-get update -qq >/dev/null 2>&1 || true
             run_as_root apt-get install -y \
                 python3 python3-venv python3-pip \
                 unrar-free p7zip-full build-essential \
                 libffi-dev libssl-dev python3-dev \
-                >/dev/null 2>&1 || \
-                warn "Some apt packages failed (continuing)"
+                >/dev/null 2>&1 || warn "Some apt packages failed"
             ;;
         arch)
             run_as_root pacman -Sy --noconfirm \
@@ -162,37 +171,33 @@ install_system_deps() {
     ok "System deps done."
 }
 
-# ---------------------- Python venv + packages (FIXED) ----------------------
+# ---------------------- Python deps (robust) ----------------------
 install_python_deps() {
     log "Setting up Python environment..."
     cd "$INSTALL_DIR"
 
-    # ---- Step 1: Ensure python3-venv is available ----
     if ! python3 -m venv --help >/dev/null 2>&1; then
-        warn "python3-venv module missing — attempting install..."
+        warn "python3-venv missing — installing..."
         case "$ENV_TYPE" in
             termux)  pkg install -y python ;;
             debian)  run_as_root apt-get install -y python3-venv || true ;;
             arch)    run_as_root pacman -Sy --noconfirm python || true ;;
             fedora)  run_as_root dnf install -y python3 || true ;;
             macos)   brew install python || true ;;
-            *)       warn "Cannot install python3-venv automatically" ;;
         esac
     fi
 
-    # ---- Step 2: Detect & clean broken venv ----
     if [ -d ".venv" ] && [ ! -f ".venv/bin/activate" ]; then
-        warn "Broken .venv detected (missing activate) — removing."
+        warn "Broken .venv detected — removing."
         rm -rf .venv
     fi
 
-    # ---- Step 3: Try to create venv ----
     VENV_OK=0
     if [ -f ".venv/bin/activate" ]; then
         VENV_OK=1
-        ok "Existing valid virtualenv found."
+        ok "Existing virtualenv is valid."
     else
-        log "Creating virtualenv at .venv ..."
+        log "Creating virtualenv..."
         if python3 -m venv .venv 2>/dev/null && [ -f ".venv/bin/activate" ]; then
             VENV_OK=1
             ok "Virtualenv created."
@@ -202,7 +207,6 @@ install_python_deps() {
         fi
     fi
 
-    # ---- Step 4: Choose pip strategy ----
     PIP_EXTRA=""
     if [ "$VENV_OK" = "1" ]; then
         # shellcheck disable=SC1091
@@ -211,50 +215,35 @@ install_python_deps() {
         PIP_EXTRA=""
         ok "Activated virtualenv."
     elif [ "$(id -u)" -eq 0 ]; then
-        # Root (Colab/Docker) — bypass PEP 668
         PIP="pip3"
         PIP_EXTRA="--break-system-packages"
         warn "Running as root — using --break-system-packages"
     else
-        # Normal user
         PIP="pip3"
         PIP_EXTRA="--user"
-        warn "Falling back to user-level pip install"
+        warn "Falling back to user pip"
     fi
 
-    # ---- Step 5: Install packages ----
-    log "Installing Python packages (this may take a few minutes)..."
-
-    # Upgrade pip / wheel (best-effort)
+    log "Installing Python packages (may take a few minutes)..."
     $PIP install $PIP_EXTRA --upgrade pip wheel >/dev/null 2>&1 || \
         warn "pip upgrade failed (continuing)"
 
-    # Termux: use pkg-provided psutil to avoid build errors
     if [ "$ENV_TYPE" = "termux" ]; then
-        log "Termux detected — using system psutil..."
+        log "Termux — using system psutil..."
         pkg install -y python-psutil >/dev/null 2>&1 || true
-        # If venv, link system psutil into venv
-        if [ "$VENV_OK" = "1" ]; then
-            SYSTEM_SITE=$(python3 -c "import sysconfig; print(sysconfig.get_paths()['purelib'])" 2>/dev/null || true)
-            if [ -d "$SYSTEM_SITE/psutil" ]; then
-                cp -r "$SYSTEM_SITE/psutil" .venv/lib/python*/site-packages/ 2>/dev/null || true
-            fi
-        fi
     fi
 
-    # Core packages
     $PIP install $PIP_EXTRA \
         pyzipper rarfile py7zr PyPDF2 flask python-telegram-bot \
         2>&1 | tail -3 || {
-        warn "Some packages failed. Retrying individually..."
+        warn "Bulk install failed. Retrying individually..."
         for pkg in pyzipper rarfile py7zr PyPDF2 flask python-telegram-bot; do
             $PIP install $PIP_EXTRA "$pkg" >/dev/null 2>&1 || \
                 warn "  → Failed: $pkg"
         done
     }
 
-    # ---- Step 6: Verify ----
-    log "Verifying installation..."
+    log "Verifying..."
     if [ "$VENV_OK" = "1" ]; then
         CHECK_PY=".venv/bin/python"
     else
@@ -270,7 +259,7 @@ install_python_deps() {
 
     if [ -n "$MISSING" ]; then
         warn "Missing modules:$MISSING"
-        warn "The tool will still run, but those formats may be unavailable."
+        warn "Some formats may not work, but bot should start."
     else
         ok "All Python modules verified."
     fi
@@ -278,7 +267,7 @@ install_python_deps() {
     ok "Python deps done."
 }
 
-# ---------------------- Download main script ----------------------
+# ---------------------- Fetch script ----------------------
 fetch_script() {
     cd "$INSTALL_DIR"
 
@@ -291,13 +280,12 @@ fetch_script() {
         else
             die "Neither curl nor wget found."
         fi
-        [ -s "$PY_SCRIPT" ] || die "Download failed or empty file."
+        [ -s "$PY_SCRIPT" ] || die "Download failed."
         ok "$PY_SCRIPT downloaded."
     else
-        ok "$PY_SCRIPT already present — keeping it."
+        ok "$PY_SCRIPT already present."
     fi
 
-    # Optional: built-in dictionary
     if [ ! -f "$DICT_FILE" ]; then
         if command -v curl >/dev/null 2>&1; then
             curl -fsSL "$REPO_RAW/$DICT_FILE" -o "$DICT_FILE" 2>/dev/null || true
@@ -308,7 +296,7 @@ fetch_script() {
     fi
 }
 
-# ---------------------- .env / token ----------------------
+# ---------------------- Token / .env ----------------------
 setup_env_file() {
     ENV_FILE="$INSTALL_DIR/.env"
 
@@ -318,38 +306,48 @@ setup_env_file() {
     fi
 
     echo
-    warn "Telegram Bot Token is required for --all / --bot mode."
+    warn "Telegram Bot Token is REQUIRED for bot mode."
     echo "  • Get one from @BotFather → /newbot"
-    echo "  • Leave blank to run web-only mode."
     echo
 
-    ask "Paste your TELEGRAM_BOT_TOKEN (or blank): " TOKEN ""
+    ask "Paste your TELEGRAM_BOT_TOKEN: " TOKEN ""
+
+    if [ -z "${TOKEN:-}" ]; then
+        die "No token provided. Bot mode cannot start."
+    fi
 
     umask 077
-    if [ -n "${TOKEN:-}" ]; then
-        {
-            echo "# Auto-generated by install.sh"
-            echo "TELEGRAM_BOT_TOKEN=$TOKEN"
-        } > "$ENV_FILE"
-        chmod 600 "$ENV_FILE" 2>/dev/null || true
-        ok "Token saved to $ENV_FILE (permissions 600)."
-    else
-        {
-            echo "# Auto-generated by install.sh"
-            echo "# TELEGRAM_BOT_TOKEN=your_token_here"
-        } > "$ENV_FILE"
-        chmod 600 "$ENV_FILE" 2>/dev/null || true
-        warn "No token — will run in web-only mode."
-    fi
+    {
+        echo "# Auto-generated by install.sh"
+        echo "TELEGRAM_BOT_TOKEN=$TOKEN"
+    } > "$ENV_FILE"
+    chmod 600 "$ENV_FILE" 2>/dev/null || true
+    ok "Token saved to $ENV_FILE (permissions 600)."
 }
 
-# ---------------------- Launcher wrapper ----------------------
+# ---------------------- Launcher ----------------------
 create_launcher() {
     LAUNCHER="$INSTALL_DIR/run.sh"
     cat > "$LAUNCHER" <<EOF
 #!/usr/bin/env bash
+# Launcher for zip_cracker (auto-kills previous instance)
 cd "\$(dirname "\$0")"
 
+SCRIPT_NAME="$PY_SCRIPT"
+
+# Kill previous instance to avoid Telegram conflict
+if command -v pgrep >/dev/null 2>&1; then
+    PIDS=\$(pgrep -f "\$SCRIPT_NAME" 2>/dev/null || true)
+    if [ -n "\$PIDS" ]; then
+        echo "[!] Killing old instance(s): \$PIDS"
+        kill \$PIDS 2>/dev/null || true
+        sleep 2
+        STILL=\$(pgrep -f "\$SCRIPT_NAME" 2>/dev/null || true)
+        [ -n "\$STILL" ] && kill -9 \$STILL 2>/dev/null || true
+    fi
+fi
+
+# Load .env
 if [ -f ".env" ]; then
     set -a
     # shellcheck disable=SC1091
@@ -357,12 +355,13 @@ if [ -f ".env" ]; then
     set +a
 fi
 
+# Activate venv if present
 if [ -f ".venv/bin/activate" ]; then
     # shellcheck disable=SC1091
     source .venv/bin/activate
-    exec python $PY_SCRIPT "\$@"
+    exec python "\$SCRIPT_NAME" "\$@"
 else
-    exec python3 $PY_SCRIPT "\$@"
+    exec python3 "\$SCRIPT_NAME" "\$@"
 fi
 EOF
     chmod +x "$LAUNCHER"
@@ -379,6 +378,8 @@ main() {
     mkdir -p "$INSTALL_DIR"
     cd "$INSTALL_DIR"
 
+    kill_previous_bot
+
     fetch_script
     install_python_deps
     setup_env_file
@@ -387,29 +388,25 @@ main() {
     echo
     ok "Installation complete!"
     echo
-    printf '%sNext steps:%s\n' "$BLD" "$NC"
-    echo "  ${CYN}cd $INSTALL_DIR${NC}"
-    echo "  ${CYN}./run.sh --all --port $PORT${NC}    # bot + web"
-    echo "  ${CYN}./run.sh --web --port $PORT${NC}    # web only"
-    echo "  ${CYN}./run.sh --bot${NC}                 # bot only"
-    echo "  ${CYN}./run.sh archive.zip${NC}            # CLI"
-    echo
-    echo "Edit token: ${CYN}nano $INSTALL_DIR/.env${NC}"
+    printf '%sOther commands (later):%s\n' "$BLD" "$NC"
+    echo "  ${CYN}~/.zip_cracker/run.sh --web --port 5000${NC}   # web only"
+    echo "  ${CYN}~/.zip_cracker/run.sh --all${NC}              # bot + web"
+    echo "  ${CYN}~/.zip_cracker/run.sh archive.zip${NC}        # CLI"
+    echo "  ${CYN}nano ~/.zip_cracker/.env${NC}                 # edit token"
     echo
 
-    if [ -t 1 ] && { [ -t 0 ] || [ -r /dev/tty ]; }; then
-        ask "Start now with --all --port $PORT ? [Y/n]: " START "Y"
-        case "${START:-Y}" in
-            [Yy]*|"")
-                echo
-                ok "Starting cracker (Ctrl+C to stop)..."
-                exec "$INSTALL_DIR/run.sh" --all --port "$PORT"
-                ;;
-            *)
-                ok "Start manually later: $INSTALL_DIR/run.sh --all"
-                ;;
-        esac
+    # Wait a moment for Telegram to clear old session
+    if command -v pgrep >/dev/null 2>&1 && pgrep -f "$PY_SCRIPT" >/dev/null 2>&1; then
+        warn "Waiting 10s for Telegram to release the old session..."
+        sleep 10
     fi
+
+    echo
+    ok "Starting bot (Ctrl+C to stop)..."
+    echo
+
+    # Run bot in the foreground
+    exec "$INSTALL_DIR/run.sh" --bot
 }
 
 main "$@"
