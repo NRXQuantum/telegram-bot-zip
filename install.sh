@@ -3,14 +3,10 @@
 #  Multi-Format Password Cracker — One-Line Installer
 #  Repo: https://github.com/NRXQuantum/telegram-bot-zip
 #
-#  Mode: Bot-only auto-start with token validation gate
 #  Supports: Termux, Debian/Ubuntu/Kali/Colab, Arch, Fedora, macOS
 #
-#  Usage (interactive):
+#  Usage:
 #    curl -fsSL https://raw.githubusercontent.com/NRXQuantum/telegram-bot-zip/main/install.sh | bash
-#
-#  Usage (env var):
-#    TELEGRAM_BOT_TOKEN="123:ABC" curl -fsSL .../install.sh | bash
 # ============================================================
 set -euo pipefail
 
@@ -18,7 +14,6 @@ set -euo pipefail
 REPO_RAW="${REPO_RAW:-https://raw.githubusercontent.com/NRXQuantum/telegram-bot-zip/main}"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.zip_cracker}"
 PY_SCRIPT="zip_cracker.py"
-DICT_FILE="password_list.txt"
 MAX_TOKEN_ATTEMPTS=3
 
 # ---------------------- Colors ----------------------
@@ -33,7 +28,6 @@ ok()   { printf '%s[+]%s %s\n' "$GRN" "$NC" "$*"; }
 warn() { printf '%s[!]%s %s\n' "$YEL" "$NC" "$*"; }
 die()  { printf '%s[✗]%s %s\n' "$RED" "$NC" "$*" >&2; exit 1; }
 
-# ---------------------- Banner ----------------------
 banner() {
 cat <<'EOF'
    ______               ____                _
@@ -46,7 +40,6 @@ EOF
 echo
 }
 
-# ---------------------- Ask (works via curl | bash) ----------------------
 ask() {
     local prompt="$1" varname="$2" default="${3:-}" ans=""
     if [ -t 0 ]; then
@@ -59,7 +52,6 @@ ask() {
     eval "$varname=\$ans"
 }
 
-# ---------------------- Root / sudo helper ----------------------
 run_as_root() {
     if [ "$(id -u)" -eq 0 ]; then
         "$@"
@@ -70,20 +62,10 @@ run_as_root() {
     fi
 }
 
-# ============================================================
-#  TOKEN VALIDATION — the heart of the fix
-# ============================================================
-# Validates a token via Telegram getMe.
-# Returns 0 (success) if valid, 1 (failure) otherwise.
-# Prints nothing except optional debug to stderr.
-# ============================================================
+# ---------------------- Token validation ----------------------
 validate_token() {
     local token="$1"
-
-    if [ -z "$token" ]; then
-        return 1
-    fi
-
+    [ -z "$token" ] && return 1
     local resp=""
     if command -v curl >/dev/null 2>&1; then
         resp=$(curl -fsSL --max-time 10 \
@@ -92,18 +74,12 @@ validate_token() {
         resp=$(wget -q -O - --timeout=10 \
             "https://api.telegram.org/bot${token}/getMe" 2>/dev/null || echo "")
     else
-        # No HTTP client — can't validate, assume valid
         return 0
     fi
-
-    if echo "$resp" | grep -q '"ok":true'; then
-        return 0
-    fi
-    return 1
+    echo "$resp" | grep -q '"ok":true'
 }
 
-# Extract bot username from a valid token
-extract_bot_username() {
+extract_username() {
     local token="$1"
     local resp=""
     if command -v curl >/dev/null 2>&1; then
@@ -113,127 +89,88 @@ extract_bot_username() {
     echo "$resp" | sed -n 's/.*"username":"\([^"]*\)".*/\1/p'
 }
 
-# Extract error reason
-extract_error() {
-    local token="$1"
-    local resp=""
-    if command -v curl >/dev/null 2>&1; then
-        resp=$(curl -fsSL --max-time 10 \
-            "https://api.telegram.org/bot${token}/getMe" 2>/dev/null || echo "")
-    fi
-    echo "$resp" | sed -n 's/.*"description":"\([^"]*\)".*/\1/p'
+read_token_from_env_file() {
+    local envf="$1"
+    [ -f "$envf" ] || return 1
+    grep -E '^[[:space:]]*TELEGRAM_BOT_TOKEN[[:space:]]*=' "$envf" 2>/dev/null \
+        | grep -v '^[[:space:]]*#' \
+        | head -n1 \
+        | sed -E 's/^[[:space:]]*TELEGRAM_BOT_TOKEN[[:space:]]*=[[:space:]]*//' \
+        | tr -d '\r\n' \
+        | sed -E 's/^"(.*)"$/\1/' \
+        | sed -E "s/^'(.*)'\$/\1/" \
+        | xargs 2>/dev/null || true
 }
 
-# ============================================================
-#  VALIDATED TOKEN GATE
-#  Runs right before launch. Blocks launch if invalid.
-#  Retries up to MAX_TOKEN_ATTEMPTS times with new tokens.
-# ============================================================
+# ---------------------- Token gate ----------------------
 token_gate() {
-    ENV_FILE="$INSTALL_DIR/.env"
+    local env_file="$INSTALL_DIR/.env"
     local attempt=0
     local current_token=""
 
     while [ "$attempt" -lt "$MAX_TOKEN_ATTEMPTS" ]; do
         attempt=$((attempt + 1))
+        current_token=$(read_token_from_env_file "$env_file" || true)
 
-        # ---------- Read current token from .env ----------
-        if [ -f "$ENV_FILE" ]; then
-            current_token=$(
-                grep -E '^[[:space:]]*TELEGRAM_BOT_TOKEN[[:space:]]*=' "$ENV_FILE" 2>/dev/null \
-                | grep -v '^[[:space:]]*#' \
-                | head -n1 \
-                | sed -E 's/^[[:space:]]*TELEGRAM_BOT_TOKEN[[:space:]]*=[[:space:]]*//' \
-                | tr -d '\r\n' \
-                | sed -E 's/^"(.*)"$/\1/' \
-                | sed -E "s/^'(.*)'\$/\1/" \
-                | xargs 2>/dev/null || true
-            )
-        fi
-
-        # ---------- Validate ----------
-        if [ -n "$current_token" ]; then
+        if [ -n "$current_token" ] && [ "$current_token" != "PASTE_YOUR_TOKEN_HERE" ]; then
             log "Validating token (attempt $attempt/$MAX_TOKEN_ATTEMPTS)..."
             if validate_token "$current_token"; then
-                local username
-                username=$(extract_bot_username "$current_token")
+                local uname
+                uname=$(extract_username "$current_token")
                 echo
                 ok "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
                 ok "  ✅ TOKEN IS VALID"
-                ok "     Bot: @${username}"
+                ok "     Bot: @${uname}"
                 ok "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
                 echo
                 return 0
             else
-                local reason
-                reason=$(extract_error "$current_token")
                 echo
-                warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                warn "  ❌ TOKEN IS INVALID"
-                warn "     Reason: ${reason:-Unknown (network?)}"
-                warn "     Preview: ${current_token:0:12}...${current_token: -4}"
-                warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                echo
-                warn "Token file: $ENV_FILE"
+                warn "❌ Token invalid (attempt $attempt)"
+                warn "   Preview: ${current_token:0:12}...${current_token: -4}"
                 echo
             fi
         else
-            warn "No token found in $ENV_FILE"
-            echo
+            warn "No valid token in $env_file"
         fi
 
-        # ---------- Interactive re-prompt ----------
         if [ -t 1 ] && { [ -t 0 ] || [ -c /dev/tty ]; }; then
-            echo "${BLD}BotFather থেকে একটি নতুন টোকেন নিন:${NC}"
-            echo "  1. Telegram → @BotFather"
-            echo "  2. /newbot  (অথবা /mybots → API Token → Revoke)"
-            echo "  3. টোকেন কপি করে নিচে পেস্ট করুন"
+            echo "BotFather → @BotFather → /newbot → টোকেন কপি"
             echo
-            ask "Paste NEW TELEGRAM_BOT_TOKEN (or press Ctrl+C to abort): " NEW_TOKEN ""
-
+            ask "Paste NEW TELEGRAM_BOT_TOKEN (Ctrl+C to abort): " NEW_TOKEN ""
             if [ -z "${NEW_TOKEN:-}" ]; then
-                warn "খালি টোকেন — আবার চেষ্টা করব..."
                 continue
             fi
-
-            # Save to .env
             umask 077
-            {
-                echo "# Auto-generated by install.sh"
-                echo "TELEGRAM_BOT_TOKEN=$NEW_TOKEN"
-            } > "$ENV_FILE"
-            chmod 600 "$ENV_FILE" 2>/dev/null || true
-            ok "Saved new token to .env — validating on next attempt..."
+            echo "TELEGRAM_BOT_TOKEN=$NEW_TOKEN" > "$env_file"
+            chmod 600 "$env_file" 2>/dev/null || true
+            ok "Token saved — validating next attempt..."
             echo
         else
-            # Non-interactive and token invalid → give up
-            die "Token invalid and no TTY for re-prompt. Update $ENV_FILE manually."
+            die "Token invalid and no TTY. Update $env_file manually."
         fi
     done
 
-    die "Token validation failed after $MAX_TOKEN_ATTEMPTS attempts. Aborting launch."
+    die "Token validation failed after $MAX_TOKEN_ATTEMPTS attempts."
 }
 
-# ---------------------- Kill previous bot ----------------------
+# ---------------------- Environment ----------------------
 kill_previous_bot() {
     if command -v pgrep >/dev/null 2>&1; then
         local PIDS
         PIDS=$(pgrep -f "$PY_SCRIPT" 2>/dev/null || true)
         if [ -n "$PIDS" ]; then
-            warn "Old instance(s) running: $PIDS — killing..."
+            warn "Old instance(s): $PIDS — killing..."
             kill $PIDS 2>/dev/null || true
             sleep 2
             local STILL
             STILL=$(pgrep -f "$PY_SCRIPT" 2>/dev/null || true)
-            if [ -n "$STILL" ]; then
-                kill -9 $STILL 2>/dev/null || true
-            fi
+            [ -n "$STILL" ] && kill -9 $STILL 2>/dev/null || true
             ok "Previous instance cleared."
         fi
     fi
 }
 
-# ---------------------- Detect environment ----------------------
 detect_env() {
     if [ -n "${TERMUX_VERSION:-}" ] || [ -d "/data/data/com.termux" ]; then
         ENV_TYPE="termux"
@@ -249,13 +186,11 @@ detect_env() {
         ENV_TYPE="unknown"
     fi
     ok "Environment: $ENV_TYPE"
-
     if [ -d "/content" ] && [ "$(id -u)" -eq 0 ]; then
         warn "Detected Google Colab / Docker root environment."
     fi
 }
 
-# ---------------------- Ensure python ----------------------
 ensure_python() {
     if ! command -v python3 >/dev/null 2>&1; then
         log "python3 not found — installing..."
@@ -265,7 +200,7 @@ ensure_python() {
             arch)    run_as_root pacman -Sy --noconfirm python ;;
             fedora)  run_as_root dnf install -y python3 ;;
             macos)   brew install python ;;
-            *)       die "python3 not found. Install manually." ;;
+            *)       die "python3 missing" ;;
         esac
     fi
     ok "Python: $(python3 --version 2>&1)"
@@ -283,15 +218,13 @@ ensure_python() {
     fi
 }
 
-# ---------------------- System packages ----------------------
 install_system_deps() {
     log "Installing system dependencies..."
     case "$ENV_TYPE" in
         termux)
             pkg update -y >/dev/null 2>&1 || true
             pkg install -y python unrar p7zip clang make libffi openssl \
-                python-psutil >/dev/null 2>&1 || \
-                warn "Some termux packages failed"
+                python-psutil >/dev/null 2>&1 || warn "Some termux packages failed"
             ;;
         debian)
             run_as_root apt-get update -qq >/dev/null 2>&1 || true
@@ -314,8 +247,7 @@ install_system_deps() {
                 >/dev/null 2>&1 || warn "Some dnf packages failed"
             ;;
         macos)
-            brew install python unrar p7zip >/dev/null 2>&1 || \
-                warn "brew install had issues"
+            brew install python unrar p7zip >/dev/null 2>&1 || true
             ;;
         *)
             warn "Unknown OS — skipping system packages."
@@ -324,7 +256,6 @@ install_system_deps() {
     ok "System deps done."
 }
 
-# ---------------------- Python deps ----------------------
 install_python_deps() {
     log "Setting up Python environment..."
     cd "$INSTALL_DIR"
@@ -341,55 +272,52 @@ install_python_deps() {
     fi
 
     if [ -d ".venv" ] && [ ! -f ".venv/bin/activate" ]; then
-        warn "Broken .venv detected — removing."
+        warn "Broken .venv — removing."
         rm -rf .venv
     fi
 
     VENV_OK=0
     if [ -f ".venv/bin/activate" ]; then
         VENV_OK=1
-        ok "Existing virtualenv is valid."
+        ok "Existing virtualenv valid."
     else
         log "Creating virtualenv..."
         if python3 -m venv .venv 2>/dev/null && [ -f ".venv/bin/activate" ]; then
             VENV_OK=1
             ok "Virtualenv created."
         else
-            warn "venv creation failed — using system pip fallback."
+            warn "venv failed — system pip fallback."
             rm -rf .venv
         fi
     fi
 
-    PIP_EXTRA=""
+    local PIP_EXTRA=""
     if [ "$VENV_OK" = "1" ]; then
         # shellcheck disable=SC1091
         source .venv/bin/activate
         PIP="pip"
         PIP_EXTRA=""
-        ok "Activated virtualenv."
     elif [ "$(id -u)" -eq 0 ]; then
         PIP="pip3"
         PIP_EXTRA="--break-system-packages"
-        warn "Running as root — using --break-system-packages"
+        warn "Root — using --break-system-packages"
     else
         PIP="pip3"
         PIP_EXTRA="--user"
-        warn "Falling back to user pip"
+        warn "Using user pip"
     fi
 
-    log "Installing Python packages (may take a few minutes)..."
-    $PIP install $PIP_EXTRA --upgrade pip wheel >/dev/null 2>&1 || \
-        warn "pip upgrade failed (continuing)"
+    log "Installing Python packages..."
+    $PIP install $PIP_EXTRA --upgrade pip wheel >/dev/null 2>&1 || true
 
     if [ "$ENV_TYPE" = "termux" ]; then
-        log "Termux — using system psutil..."
         pkg install -y python-psutil >/dev/null 2>&1 || true
     fi
 
     $PIP install $PIP_EXTRA \
         pyzipper rarfile py7zr PyPDF2 flask python-telegram-bot \
         2>&1 | tail -3 || {
-        warn "Bulk install failed. Retrying individually..."
+        warn "Bulk failed — retrying individually..."
         for pkg in pyzipper rarfile py7zr PyPDF2 flask python-telegram-bot; do
             $PIP install $PIP_EXTRA "$pkg" >/dev/null 2>&1 || \
                 warn "  → Failed: $pkg"
@@ -397,32 +325,22 @@ install_python_deps() {
     }
 
     log "Verifying..."
-    if [ "$VENV_OK" = "1" ]; then
-        CHECK_PY=".venv/bin/python"
-    else
-        CHECK_PY="python3"
-    fi
-
-    MISSING=""
+    local CHECK_PY
+    [ "$VENV_OK" = "1" ] && CHECK_PY=".venv/bin/python" || CHECK_PY="python3"
+    local MISSING=""
     for mod in pyzipper rarfile py7zr PyPDF2 flask telegram; do
-        if ! $CHECK_PY -c "import $mod" 2>/dev/null; then
-            MISSING="$MISSING $mod"
-        fi
+        $CHECK_PY -c "import $mod" 2>/dev/null || MISSING="$MISSING $mod"
     done
-
     if [ -n "$MISSING" ]; then
         warn "Missing modules:$MISSING"
     else
         ok "All Python modules verified."
     fi
-
     ok "Python deps done."
 }
 
-# ---------------------- Fetch script ----------------------
 fetch_script() {
     cd "$INSTALL_DIR"
-
     if [ ! -f "$PY_SCRIPT" ]; then
         log "Downloading $PY_SCRIPT ..."
         if command -v curl >/dev/null 2>&1; then
@@ -437,66 +355,44 @@ fetch_script() {
     else
         ok "$PY_SCRIPT already present."
     fi
-
-    if [ ! -f "$DICT_FILE" ]; then
-        if command -v curl >/dev/null 2>&1; then
-            curl -fsSL "$REPO_RAW/$DICT_FILE" -o "$DICT_FILE" 2>/dev/null || true
-        elif command -v wget >/dev/null 2>&1; then
-            wget -q "$REPO_RAW/$DICT_FILE" -O "$DICT_FILE" 2>/dev/null || true
-        fi
-        [ -s "$DICT_FILE" ] && ok "$DICT_FILE downloaded." || true
-    fi
 }
 
-# ---------------------- Initial token capture (no validation) ----------------------
 setup_env_file() {
-    ENV_FILE="$INSTALL_DIR/.env"
+    local ENV_FILE="$INSTALL_DIR/.env"
 
-    # If env var provided, save it (validation happens later in token_gate)
+    # Priority 1: env var
     if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
-        ok "TELEGRAM_BOT_TOKEN provided via environment variable."
+        ok "Token from env var."
         umask 077
-        {
-            echo "# Auto-generated by install.sh (from env var)"
-            echo "TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN"
-        } > "$ENV_FILE"
+        echo "TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN" > "$ENV_FILE"
         chmod 600 "$ENV_FILE" 2>/dev/null || true
-        ok "Token saved to $ENV_FILE"
         return
     fi
 
-    # If .env already has a token, keep it (will be validated by token_gate)
-    if [ -f "$ENV_FILE" ] && grep -qE '^[[:space:]]*TELEGRAM_BOT_TOKEN[[:space:]]*=' "$ENV_FILE"; then
-        ok "Existing .env found — token will be validated before launch."
+    # Priority 2: existing .env
+    if [ -f "$ENV_FILE" ]; then
+        ok "Existing .env found."
+        chmod 600 "$ENV_FILE" 2>/dev/null || true
         return
     fi
 
-    # Otherwise ask now
+    # Priority 3: ask
     echo
-    warn "Telegram Bot Token required. (Will be validated before launch.)"
-    echo "  • Get one from @BotFather → /newbot"
+    warn "Telegram Bot Token required."
+    echo "  Get from @BotFather → /newbot"
     echo
-    ask "Paste your TELEGRAM_BOT_TOKEN (or leave blank to abort): " TOKEN ""
-
-    if [ -z "${TOKEN:-}" ]; then
-        die "No token provided. Aborting."
-    fi
-
+    ask "Paste token (or blank to abort): " TOKEN ""
+    [ -z "${TOKEN:-}" ] && die "No token provided."
     umask 077
-    {
-        echo "# Auto-generated by install.sh"
-        echo "TELEGRAM_BOT_TOKEN=$TOKEN"
-    } > "$ENV_FILE"
+    echo "TELEGRAM_BOT_TOKEN=$TOKEN" > "$ENV_FILE"
     chmod 600 "$ENV_FILE" 2>/dev/null || true
-    ok "Token saved — will be validated before launch."
+    ok "Token saved."
 }
 
-# ---------------------- Launcher ----------------------
 create_launcher() {
-    LAUNCHER="$INSTALL_DIR/run.sh"
+    local LAUNCHER="$INSTALL_DIR/run.sh"
     cat > "$LAUNCHER" <<EOF
 #!/usr/bin/env bash
-# Launcher for zip_cracker (auto-kills previous instance)
 cd "\$(dirname "\$0")"
 
 SCRIPT_NAME="$PY_SCRIPT"
@@ -504,7 +400,7 @@ SCRIPT_NAME="$PY_SCRIPT"
 if command -v pgrep >/dev/null 2>&1; then
     PIDS=\$(pgrep -f "\$SCRIPT_NAME" 2>/dev/null || true)
     if [ -n "\$PIDS" ]; then
-        echo "[!] Killing old instance(s): \$PIDS"
+        echo "[!] Killing old: \$PIDS"
         kill \$PIDS 2>/dev/null || true
         sleep 2
         STILL=\$(pgrep -f "\$SCRIPT_NAME" 2>/dev/null || true)
@@ -531,7 +427,6 @@ EOF
     ok "Launcher created: $LAUNCHER"
 }
 
-# ---------------------- Main ----------------------
 main() {
     banner
     detect_env
@@ -542,43 +437,32 @@ main() {
     cd "$INSTALL_DIR"
 
     kill_previous_bot
-
     fetch_script
     install_python_deps
     setup_env_file
     create_launcher
 
-    # ============================================================
-    #  VALIDATION GATE — before launch
-    # ============================================================
     echo
     log "═══════════════════════════════════════════════════════"
     log "  Pre-launch token validation"
     log "═══════════════════════════════════════════════════════"
-
-    if ! token_gate; then
-        die "Token validation failed. Not launching bot."
-    fi
+    token_gate
 
     echo
     ok "Installation complete!"
-    echo
-    printf '%sOther commands (later):%s\n' "$BLD" "$NC"
-    echo "  ${CYN}~/.zip_cracker/run.sh --web --port 5000${NC}   # web only"
-    echo "  ${CYN}~/.zip_cracker/run.sh --all${NC}              # bot + web"
-    echo "  ${CYN}~/.zip_cracker/run.sh archive.zip${NC}        # CLI"
-    echo "  ${CYN}nano ~/.zip_cracker/.env${NC}                 # edit token"
+    echo "  ~/.zip_cracker/run.sh --web --port 5000   # web only"
+    echo "  ~/.zip_cracker/run.sh --all               # bot + web"
+    echo "  ~/.zip_cracker/run.sh archive.zip         # CLI"
     echo
 
     if command -v pgrep >/dev/null 2>&1 && pgrep -f "$PY_SCRIPT" >/dev/null 2>&1; then
-        warn "Waiting 10s for Telegram to release the old session..."
+        warn "Waiting 10s for Telegram to release old session..."
         sleep 10
     fi
 
     echo
     ok "Starting bot (Ctrl+C to stop)..."
     echo
-
     exec "$INSTALL_DIR/run.sh" --bot
 }
 
